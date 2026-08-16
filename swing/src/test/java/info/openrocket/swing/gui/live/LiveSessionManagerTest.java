@@ -23,6 +23,7 @@ import info.openrocket.core.document.OpenRocketDocumentFactory;
 import info.openrocket.core.file.GeneralRocketSaver;
 import info.openrocket.core.live.LiveInvite;
 import info.openrocket.core.live.LiveDocumentCodec;
+import info.openrocket.core.live.LiveProjectLink;
 import info.openrocket.core.live.LiveSessionEvent;
 import info.openrocket.core.live.LiveSessionLog;
 import info.openrocket.swing.util.BaseTestCase;
@@ -111,6 +112,86 @@ class LiveSessionManagerTest extends BaseTestCase {
 		}
 	}
 
+	@Test
+	void disconnectedEditsBecomeAnOfflineBranchThatTheHostCanAccept() throws Exception {
+		OpenRocketDocument hostDocument = OpenRocketDocumentFactory.createNewRocket();
+		File hostFile = temporaryDirectory.resolve("offline-host.ork").toFile();
+		hostDocument.setFile(hostFile);
+		new GeneralRocketSaver().save(hostFile, hostDocument);
+		OpenRocketDocument participantDocument = OpenRocketDocumentFactory.createNewRocket();
+		File participantFile = temporaryDirectory.resolve("offline-friend.ork").toFile();
+		RecordingListener participantListener = new RecordingListener();
+		LiveSessionManager originalHost = new LiveSessionManager(hostDocument, new RecordingListener());
+		LiveSessionManager participant = new LiveSessionManager(participantDocument, participantListener);
+		LiveSessionManager resumedHost = null;
+		try {
+			LiveInvite invite = originalHost.host("Host", "Workshop", null);
+			participant.join(invite, "Friend", participantFile);
+			assertTrue(participantListener.live.await(8, TimeUnit.SECONDS));
+
+			originalHost.leaveSession();
+			await(() -> !participant.isConnected()
+					&& participant.getRole() == LiveSessionManager.Role.PARTICIPANT, 8);
+			SwingUtilities.invokeAndWait(() -> participantDocument.getRocket().setName("Offline Rocket"));
+			Path branchFile = temporaryDirectory.resolve("offline-friend-offline-branch.ork");
+			await(() -> Files.exists(branchFile), 8);
+			assertEquals("Offline Rocket",
+					LiveDocumentCodec.decode(Files.readAllBytes(branchFile)).getRocket().getName());
+
+			RecordingListener resumedHostListener = new RecordingListener(true);
+			resumedHost = new LiveSessionManager(hostDocument, resumedHostListener);
+			resumedHost.host("Host", "Workshop", invite.getSessionId(), invite,
+					LiveProjectLink.EditPolicy.ALLOW_OFFLINE_BRANCHES);
+			await(() -> "Offline Rocket".equals(hostDocument.getRocket().getName()), 15);
+			assertTrue(resumedHostListener.offlineProposal.await(8, TimeUnit.SECONDS));
+			await(() -> participant.isConnected(), 8);
+		} finally {
+			participant.close();
+			if (resumedHost != null) {
+				resumedHost.close();
+			}
+			originalHost.close();
+		}
+	}
+
+	@Test
+	void hostCanBanAParticipantIdentityFromTheRoom() throws Exception {
+		OpenRocketDocument hostDocument = OpenRocketDocumentFactory.createNewRocket();
+		File hostFile = temporaryDirectory.resolve("ban-host.ork").toFile();
+		hostDocument.setFile(hostFile);
+		new GeneralRocketSaver().save(hostFile, hostDocument);
+		OpenRocketDocument participantDocument = OpenRocketDocumentFactory.createNewRocket();
+		RecordingListener participantListener = new RecordingListener();
+		LiveSessionManager host = new LiveSessionManager(hostDocument, new RecordingListener());
+		LiveSessionManager participant = new LiveSessionManager(participantDocument, participantListener);
+		LiveSessionManager returningParticipant = null;
+		try {
+			LiveInvite invite = host.host("Host", "Ban Test", null);
+			participant.join(invite, "Friend", temporaryDirectory.resolve("banned-friend.ork").toFile());
+			assertTrue(participantListener.live.await(8, TimeUnit.SECONDS));
+			String bannedId = participant.getParticipantId();
+
+			assertTrue(host.removeParticipant(bannedId, true));
+			await(() -> participant.getRole() == LiveSessionManager.Role.IDLE, 8);
+
+			RecordingListener returningListener = new RecordingListener();
+			returningParticipant = new LiveSessionManager(
+					OpenRocketDocumentFactory.createNewRocket(), returningListener);
+			returningParticipant.join(invite, "Friend",
+					temporaryDirectory.resolve("banned-friend-return.ork").toFile(), bannedId,
+					LiveProjectLink.EditPolicy.ALLOW_OFFLINE_BRANCHES, true);
+			LiveSessionManager finalReturningParticipant = returningParticipant;
+			await(() -> finalReturningParticipant.getRole() == LiveSessionManager.Role.IDLE, 8);
+			assertTrue(returningListener.error.await(8, TimeUnit.SECONDS));
+		} finally {
+			if (returningParticipant != null) {
+				returningParticipant.close();
+			}
+			participant.close();
+			host.close();
+		}
+	}
+
 	private static void await(BooleanSupplier condition, int seconds) throws Exception {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
 		while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
@@ -122,9 +203,19 @@ class LiveSessionManagerTest extends BaseTestCase {
 	private static final class RecordingListener implements LiveSessionManager.Listener {
 		private final CountDownLatch live = new CountDownLatch(1);
 		private final CountDownLatch error = new CountDownLatch(1);
+		private final CountDownLatch offlineProposal = new CountDownLatch(1);
+		private final boolean acceptOfflineBranches;
 		private final CopyOnWriteArrayList<String> chatMessages = new CopyOnWriteArrayList<>();
 		private final CopyOnWriteArrayList<String> presenceMessages = new CopyOnWriteArrayList<>();
 		private final CopyOnWriteArrayList<String> cursorMessages = new CopyOnWriteArrayList<>();
+
+		private RecordingListener() {
+			this(false);
+		}
+
+		private RecordingListener(boolean acceptOfflineBranches) {
+			this.acceptOfflineBranches = acceptOfflineBranches;
+		}
 
 		@Override
 		public void stateChanged(LiveSessionManager.Role role, String status) {
@@ -135,6 +226,9 @@ class LiveSessionManagerTest extends BaseTestCase {
 
 		@Override
 		public void eventReceived(LiveSessionEvent event) {
+			if (event.getType() == LiveSessionEvent.Type.CHAT_MESSAGE) {
+				chatMessages.add(event.getParticipantName() + ": " + event.getNewValue());
+			}
 		}
 
 		@Override
@@ -156,6 +250,17 @@ class LiveSessionManagerTest extends BaseTestCase {
 		public void cursorMoved(String participantId, String participantName, String surfaceId,
 				double x, double y) {
 			cursorMessages.add(participantName + ":" + surfaceId + ":" + x + ":" + y);
+		}
+
+		@Override
+		public void offlineBranchProposed(String participantId, String participantName,
+				Runnable accept, Runnable keepHostVersion) {
+			offlineProposal.countDown();
+			if (acceptOfflineBranches) {
+				accept.run();
+			} else {
+				keepHostVersion.run();
+			}
 		}
 	}
 }

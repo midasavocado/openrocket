@@ -10,7 +10,10 @@ public final class LiveWireMessage {
 		HELLO,
 		WELCOME,
 		PROPOSE_DOCUMENT,
+		PROPOSE_OFFLINE_BRANCH,
 		DOCUMENT_UPDATE,
+		EVENT,
+		SETTINGS,
 		CHAT,
 		PRESENCE,
 		CURSOR,
@@ -28,6 +31,7 @@ public final class LiveWireMessage {
 	private List<LiveSessionEvent> history;
 	private byte[] document;
 	private String text;
+	private String settings;
 	private String timestamp;
 	private String surfaceId;
 	private double x;
@@ -45,10 +49,12 @@ public final class LiveWireMessage {
 		return message;
 	}
 
-	public static LiveWireMessage welcome(String sessionId, long revision, byte[] document,
-			List<LiveSessionEvent> history) {
+	public static LiveWireMessage welcome(String sessionId, String roomName, String settings, long revision,
+			byte[] document, List<LiveSessionEvent> history) {
 		LiveWireMessage message = new LiveWireMessage(Type.WELCOME);
 		message.sessionId = sessionId;
+		message.text = roomName;
+		message.settings = settings;
 		message.revision = revision;
 		message.document = document;
 		message.history = history;
@@ -66,6 +72,13 @@ public final class LiveWireMessage {
 		return message;
 	}
 
+	public static LiveWireMessage offlineProposal(String sessionId, long baseRevision, String participantId,
+			String participantName, byte[] document) {
+		LiveWireMessage message = proposal(sessionId, baseRevision, participantId, participantName, document);
+		message.type = Type.PROPOSE_OFFLINE_BRANCH;
+		return message;
+	}
+
 	public static LiveWireMessage update(String sessionId, long revision, LiveSessionEvent event,
 			byte[] document) {
 		LiveWireMessage message = new LiveWireMessage(Type.DOCUMENT_UPDATE);
@@ -76,6 +89,21 @@ public final class LiveWireMessage {
 		return message;
 	}
 
+	public static LiveWireMessage event(String sessionId, long revision, LiveSessionEvent event) {
+		LiveWireMessage message = new LiveWireMessage(Type.EVENT);
+		message.sessionId = sessionId;
+		message.revision = revision;
+		message.event = event;
+		return message;
+	}
+
+	public static LiveWireMessage settings(String sessionId, String settings) {
+		LiveWireMessage message = new LiveWireMessage(Type.SETTINGS);
+		message.sessionId = sessionId;
+		message.settings = settings;
+		return message;
+	}
+
 	public static LiveWireMessage error(String text) {
 		LiveWireMessage message = new LiveWireMessage(Type.ERROR);
 		message.text = text;
@@ -83,9 +111,15 @@ public final class LiveWireMessage {
 	}
 
 	public static LiveWireMessage chat(String sessionId, String participantId, String participantName, String text) {
+		return chat(sessionId, participantId, participantName, text, null);
+	}
+
+	public static LiveWireMessage chat(String sessionId, String participantId, String participantName, String text,
+			LiveSessionEvent event) {
 		LiveWireMessage message = participantMessage(Type.CHAT, sessionId, participantId, participantName);
 		message.text = text;
-		message.timestamp = Instant.now().toString();
+		message.event = event;
+		message.timestamp = event == null ? Instant.now().toString() : event.getTimestamp();
 		return message;
 	}
 
@@ -158,6 +192,10 @@ public final class LiveWireMessage {
 
 	public String getTimestamp() {
 		return timestamp;
+	}
+
+	public String getSettings() {
+		return settings;
 	}
 
 	public String getSurfaceId() {

@@ -24,9 +24,13 @@ public final class LiveInvite {
 	}
 
 	public static LiveInvite create(String host, int port) {
+		return create(host, port, UUID.randomUUID().toString());
+	}
+
+	public static LiveInvite create(String host, int port, String sessionId) {
 		byte[] secret = new byte[32];
 		new SecureRandom().nextBytes(secret);
-		return new LiveInvite(host, port, UUID.randomUUID().toString(), secret);
+		return new LiveInvite(host, port, sessionId, secret);
 	}
 
 	public static LiveInvite parse(String value) {

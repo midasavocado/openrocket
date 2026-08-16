@@ -131,6 +131,7 @@ import info.openrocket.swing.gui.live.LiveSessionManager;
 import info.openrocket.swing.gui.live.LiveSidebar;
 import info.openrocket.swing.gui.live.LiveCursorController;
 import info.openrocket.core.live.LiveInvite;
+import info.openrocket.core.live.LiveProjectLink;
 import info.openrocket.swing.gui.main.componenttree.ComponentTree;
 import info.openrocket.swing.gui.scalefigure.RocketPanel;
 import info.openrocket.swing.gui.util.DummyFrameMenuOSX;
@@ -208,7 +209,9 @@ private static final Translator trans = Application.getTranslator();
 	private JMenuItem copyLiveInviteMenuItem;
 	private JCheckBoxMenuItem showLiveSidebarMenuItem;
 	private JCheckBoxMenuItem showLiveCursorsMenuItem;
+	private JMenuItem liveRoomSettingsMenuItem;
 	private JMenuItem leaveLiveSessionMenuItem;
+	private LiveProjectLink liveProjectLink;
 
 	private boolean showBananaForScaleInToolsMenu = false;
 	private JCheckBoxMenuItem bananaForScaleMenuItem = null;
@@ -395,6 +398,7 @@ private static final Translator trans = Application.getTranslator();
 			}
 		}
 		log.debug("BasicFrame instantiation complete");
+		SwingUtilities.invokeLater(this::autoOpenLinkedRoom);
 	}
 
 	@Override
@@ -961,7 +965,7 @@ private static final Translator trans = Application.getTranslator();
 		JMenu menu = new JMenu("Collaborate");
 		menu.setMnemonic(KeyEvent.VK_C);
 
-		startLiveSessionMenuItem = new JMenuItem("Start Live Session...");
+		startLiveSessionMenuItem = new JMenuItem("Host Live Room...");
 		startLiveSessionMenuItem.addActionListener(event -> hostLiveSession());
 		menu.add(startLiveSessionMenuItem);
 
@@ -984,6 +988,9 @@ private static final Translator trans = Application.getTranslator();
 		showLiveCursorsMenuItem.addActionListener(event ->
 				liveCursorController.setCursorsVisible(showLiveCursorsMenuItem.isSelected()));
 		menu.add(showLiveCursorsMenuItem);
+		liveRoomSettingsMenuItem = new JMenuItem("Room Settings...");
+		liveRoomSettingsMenuItem.addActionListener(event -> showLiveRoomSettings());
+		menu.add(liveRoomSettingsMenuItem);
 
 		menu.addSeparator();
 		leaveLiveSessionMenuItem = new JMenuItem("Leave Live Session");
@@ -996,6 +1003,9 @@ private static final Translator trans = Application.getTranslator();
 					showLiveSidebarMenuItem.setSelected(false);
 					liveSidebar.setVisible(false);
 					revalidate();
+				}
+				if (liveSessionManager.isConnected()) {
+					persistLiveProjectLink();
 				}
 				updateLiveMenuState();
 			}
@@ -1013,11 +1023,13 @@ private static final Translator trans = Application.getTranslator();
 		copyLiveInviteMenuItem.setEnabled(connected);
 		showLiveSidebarMenuItem.setEnabled(!idle);
 		showLiveCursorsMenuItem.setEnabled(connected);
+		liveRoomSettingsMenuItem.setEnabled(role == LiveSessionManager.Role.HOST && connected);
 		leaveLiveSessionMenuItem.setEnabled(!idle);
 		if (role == LiveSessionManager.Role.HOST) {
 			leaveLiveSessionMenuItem.setText("End Live Session...");
 		} else if (role == LiveSessionManager.Role.PARTICIPANT && !connected) {
-			leaveLiveSessionMenuItem.setText("Cancel Joining...");
+			leaveLiveSessionMenuItem.setText(liveSessionManager.hasEverConnected()
+					? "Leave Offline Room..." : "Cancel Joining...");
 		} else {
 			leaveLiveSessionMenuItem.setText("Leave Live Session...");
 		}
@@ -1027,6 +1039,79 @@ private static final Translator trans = Application.getTranslator();
 		showLiveSidebarMenuItem.setSelected(true);
 		liveSidebar.setVisible(true);
 		revalidate();
+	}
+
+	private void showLiveRoomSettings() {
+		if (liveSessionManager.getRole() != LiveSessionManager.Role.HOST) {
+			return;
+		}
+		JCheckBox requireConnection = new JCheckBox("Require a connection to edit the shared design",
+				liveSessionManager.getEditPolicy() == LiveProjectLink.EditPolicy.REQUIRE_CONNECTION);
+		JCheckBox autoOpen = new JCheckBox("Automatically host this room when the design opens",
+				liveProjectLink == null || liveProjectLink.isAutoOpen());
+		int result = JOptionPane.showConfirmDialog(this,
+				new Object[] { requireConnection,
+						"If unchecked, disconnected collaborators may create an offline branch.", autoOpen },
+				"Live Room Settings", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+		if (result != JOptionPane.OK_OPTION) {
+			return;
+		}
+		LiveProjectLink.EditPolicy policy = requireConnection.isSelected()
+				? LiveProjectLink.EditPolicy.REQUIRE_CONNECTION
+				: LiveProjectLink.EditPolicy.ALLOW_OFFLINE_BRANCHES;
+		liveSessionManager.setEditPolicy(policy);
+		persistLiveProjectLink(policy, autoOpen.isSelected());
+	}
+
+	private void autoOpenLinkedRoom() {
+		if (document.getFile() == null || liveSessionManager.getRole() != LiveSessionManager.Role.IDLE) {
+			return;
+		}
+		try {
+			liveProjectLink = LiveProjectLink.read(document.getFile());
+			if (liveProjectLink == null || !liveProjectLink.isAutoOpen()) {
+				return;
+			}
+			LiveInvite linkedInvite = LiveInvite.parse(liveProjectLink.getInvite());
+			if (liveProjectLink.getLocalRole() == LiveProjectLink.LocalRole.HOST) {
+				liveSessionManager.host(liveProjectLink.getDisplayName(), liveProjectLink.getRoomName(),
+						liveProjectLink.getRoomId(), linkedInvite, liveProjectLink.getEditPolicy());
+			} else {
+				liveSessionManager.join(linkedInvite, liveProjectLink.getDisplayName(), document.getFile(),
+						liveProjectLink.getClientId(), liveProjectLink.getEditPolicy(), true);
+			}
+			showLiveSidebar();
+			updateLiveMenuState();
+		} catch (IOException | IllegalArgumentException | IllegalStateException e) {
+			log.warn("Could not automatically open linked OpenRocket Live room", e);
+			JOptionPane.showMessageDialog(this,
+					"Could not automatically open the linked Live room.\n\n" + e.getMessage(),
+					"OpenRocket Live", JOptionPane.WARNING_MESSAGE);
+		}
+	}
+
+	private void persistLiveProjectLink() {
+		boolean autoOpen = liveProjectLink == null || liveProjectLink.isAutoOpen();
+		persistLiveProjectLink(liveSessionManager.getEditPolicy(), autoOpen);
+	}
+
+	private void persistLiveProjectLink(LiveProjectLink.EditPolicy policy, boolean autoOpen) {
+		if (document.getFile() == null || liveSessionManager.getInvite() == null
+				|| liveSessionManager.getRoomName() == null) {
+			return;
+		}
+		LiveProjectLink.LocalRole localRole = liveSessionManager.getRole() == LiveSessionManager.Role.HOST
+				? LiveProjectLink.LocalRole.HOST : LiveProjectLink.LocalRole.PARTICIPANT;
+		String clientId = liveSessionManager.getParticipantId();
+		liveProjectLink = new LiveProjectLink(liveSessionManager.getInvite().getSessionId(),
+				liveSessionManager.getRoomName(), liveSessionManager.getInvite().encode(),
+				liveSessionManager.getParticipantName(), clientId, localRole,
+				policy, autoOpen, liveSessionManager.getRevision());
+		try {
+			liveProjectLink.write(document.getFile());
+		} catch (IOException e) {
+			log.warn("Could not save OpenRocket Live project link", e);
+		}
 	}
 
 	private void leaveLiveSession() {
@@ -1041,8 +1126,10 @@ private static final Translator trans = Application.getTranslator();
 			message = "End this Live session and disconnect everyone?\n\n"
 					+ "Everyone's local .ork and .orklog files will remain saved.";
 		} else if (!liveSessionManager.isConnected()) {
-			title = "Cancel Joining?";
-			message = "Stop trying to join this Live session?";
+			title = liveSessionManager.hasEverConnected() ? "Leave Offline Room?" : "Cancel Joining?";
+			message = liveSessionManager.hasEverConnected()
+					? "Stop reconnecting to this Live room?\n\nYour local design and any offline branch will remain saved."
+					: "Stop trying to join this Live session?";
 		} else {
 			title = "Leave Live Session?";
 			message = "Leave this Live session?\n\nYour local .ork and .orklog files will remain saved.";
@@ -1073,8 +1160,33 @@ private static final Translator trans = Application.getTranslator();
 		if (name == null || name.isBlank()) {
 			return;
 		}
+		String roomName;
+		String existingSessionId = null;
 		try {
-			LiveInvite newInvite = liveSessionManager.host(name.trim());
+			java.util.List<LiveSessionManager.Room> rooms = liveSessionManager.getAvailableRooms();
+			Object[] choices = new Object[rooms.size() + 1];
+			choices[0] = "Create a New Room";
+			for (int i = 0; i < rooms.size(); i++) {
+				choices[i + 1] = rooms.get(i);
+			}
+			Object selected = JOptionPane.showInputDialog(this,
+					"Create a room or reopen one stored in this design's .orklog:",
+					"Host OpenRocket Live Room", JOptionPane.PLAIN_MESSAGE, null, choices, choices[0]);
+			if (selected == null) {
+				return;
+			}
+			if (selected instanceof LiveSessionManager.Room room) {
+				roomName = room.name();
+				existingSessionId = room.sessionId();
+			} else {
+				roomName = JOptionPane.showInputDialog(this, "Room name:",
+						document.getRocket().getName());
+				if (roomName == null || roomName.isBlank()) {
+					return;
+				}
+			}
+
+			LiveInvite newInvite = liveSessionManager.host(name.trim(), roomName.trim(), existingSessionId);
 			copyToClipboard(newInvite.encode());
 			showLiveSidebar();
 			updateLiveMenuState();

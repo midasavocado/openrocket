@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
@@ -81,5 +82,24 @@ class LiveCoreTest extends BaseTestCase {
 			assertEquals(LiveWireMessage.Type.HELLO, message.getType());
 			assertEquals("Midas", message.getParticipantName());
 		}
+	}
+
+	@Test
+	void projectLinkRoundTripsBesideTheDesign() throws Exception {
+		File design = temporaryDirectory.resolve("shared-design.ork").toFile();
+		LiveProjectLink link = new LiveProjectLink("room-id", "Launch Team", "invite-value", "Midas",
+				"client-id", LiveProjectLink.LocalRole.PARTICIPANT,
+				LiveProjectLink.EditPolicy.REQUIRE_CONNECTION, true, 42);
+
+		link.write(design);
+		LiveProjectLink restored = LiveProjectLink.read(design);
+
+		assertNotNull(restored);
+		assertEquals("room-id", restored.getRoomId());
+		assertEquals("Launch Team", restored.getRoomName());
+		assertEquals("client-id", restored.getClientId());
+		assertEquals(LiveProjectLink.EditPolicy.REQUIRE_CONNECTION, restored.getEditPolicy());
+		assertEquals(42, restored.getLastRevision());
+		assertTrue(Files.exists(LiveProjectLink.pathForDesign(design)));
 	}
 }
