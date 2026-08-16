@@ -130,6 +130,7 @@ import info.openrocket.swing.gui.help.tours.GuidedTourSelectionDialog;
 import info.openrocket.swing.gui.live.LiveSessionManager;
 import info.openrocket.swing.gui.live.LiveSidebar;
 import info.openrocket.swing.gui.live.LiveCursorController;
+import info.openrocket.swing.gui.live.LiveRoomSettingsDialog;
 import info.openrocket.core.live.LiveInvite;
 import info.openrocket.core.live.LiveProjectLink;
 import info.openrocket.swing.gui.main.componenttree.ComponentTree;
@@ -1045,22 +1046,19 @@ private static final Translator trans = Application.getTranslator();
 		if (liveSessionManager.getRole() != LiveSessionManager.Role.HOST) {
 			return;
 		}
-		JCheckBox requireConnection = new JCheckBox("Require a connection to edit the shared design",
-				liveSessionManager.getEditPolicy() == LiveProjectLink.EditPolicy.REQUIRE_CONNECTION);
-		JCheckBox autoOpen = new JCheckBox("Automatically host this room when the design opens",
-				liveProjectLink == null || liveProjectLink.isAutoOpen());
-		int result = JOptionPane.showConfirmDialog(this,
-				new Object[] { requireConnection,
-						"If unchecked, disconnected collaborators may create an offline branch.", autoOpen },
-				"Live Room Settings", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-		if (result != JOptionPane.OK_OPTION) {
+		boolean autoOpen = liveProjectLink == null || liveProjectLink.isAutoOpen();
+		LiveRoomSettingsDialog.Result result = LiveRoomSettingsDialog.showDialog(this,
+				liveSessionManager, autoOpen);
+		if (result == null) {
 			return;
 		}
-		LiveProjectLink.EditPolicy policy = requireConnection.isSelected()
-				? LiveProjectLink.EditPolicy.REQUIRE_CONNECTION
-				: LiveProjectLink.EditPolicy.ALLOW_OFFLINE_BRANCHES;
-		liveSessionManager.setEditPolicy(policy);
-		persistLiveProjectLink(policy, autoOpen.isSelected());
+		liveSessionManager.setEditPolicy(result.editPolicy());
+		persistLiveProjectLink(result.editPolicy(), result.autoOpen());
+		if (result.newHostId() != null && !liveSessionManager.transferHost(result.newHostId())) {
+			JOptionPane.showMessageDialog(this,
+					"That participant is no longer available to become host.",
+					"OpenRocket Live", JOptionPane.WARNING_MESSAGE);
+		}
 	}
 
 	private void autoOpenLinkedRoom() {
@@ -1124,7 +1122,7 @@ private static final Translator trans = Application.getTranslator();
 		if (role == LiveSessionManager.Role.HOST) {
 			title = "End Live Session?";
 			message = "End this Live session and disconnect everyone?\n\n"
-					+ "Everyone's local .ork and .orklog files will remain saved.";
+					+ "Everyone's local design and text activity log files will remain saved.";
 		} else if (!liveSessionManager.isConnected()) {
 			title = liveSessionManager.hasEverConnected() ? "Leave Offline Room?" : "Cancel Joining?";
 			message = liveSessionManager.hasEverConnected()
@@ -1132,7 +1130,7 @@ private static final Translator trans = Application.getTranslator();
 					: "Stop trying to join this Live session?";
 		} else {
 			title = "Leave Live Session?";
-			message = "Leave this Live session?\n\nYour local .ork and .orklog files will remain saved.";
+			message = "Leave this Live session?\n\nYour local design and text activity log will remain saved.";
 		}
 		int result = JOptionPane.showConfirmDialog(this, message, title,
 				JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
@@ -1169,8 +1167,8 @@ private static final Translator trans = Application.getTranslator();
 			for (int i = 0; i < rooms.size(); i++) {
 				choices[i + 1] = rooms.get(i);
 			}
-			Object selected = JOptionPane.showInputDialog(this,
-					"Create a room or reopen one stored in this design's .orklog:",
+				Object selected = JOptionPane.showInputDialog(this,
+						"Create a room or reopen one stored in this design's activity log:",
 					"Host OpenRocket Live Room", JOptionPane.PLAIN_MESSAGE, null, choices, choices[0]);
 			if (selected == null) {
 				return;

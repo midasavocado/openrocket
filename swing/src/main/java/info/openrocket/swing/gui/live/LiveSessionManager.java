@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -59,6 +60,13 @@ public final class LiveSessionManager implements Closeable {
 				displayTime = displayTime.substring(0, 16);
 			}
 			return name + "  •  " + displayTime;
+		}
+	}
+
+	public record Participant(String id, String name) {
+		@Override
+		public String toString() {
+			return name;
 		}
 	}
 
@@ -141,7 +149,10 @@ public final class LiveSessionManager implements Closeable {
 	private LiveInvite invite;
 	private LiveSessionLog sessionLog;
 	private ServerSocket serverSocket;
+	private ServerSocket pendingHostServer;
 	private LiveSecureConnection hostConnection;
+	private LiveInvite pendingHostInvite;
+	private String pendingTransferParticipantId;
 	private ScheduledFuture<?> pendingChange;
 	private ScheduledFuture<?> pendingSave;
 	private byte[] pendingSnapshot;
@@ -283,6 +294,19 @@ public final class LiveSessionManager implements Closeable {
 		return editPolicy;
 	}
 
+	public List<Participant> getParticipants() {
+		List<Participant> result = new ArrayList<>();
+		if (participantId != null && participantName != null) {
+			result.add(new Participant(participantId, participantName));
+		}
+		if (role == Role.HOST) {
+			for (Peer peer : peers) {
+				result.add(new Participant(peer.participantId, peer.participantName));
+			}
+		}
+		return Collections.unmodifiableList(result);
+	}
+
 	public void setEditPolicy(LiveProjectLink.EditPolicy policy) {
 		if (role != Role.HOST || policy == null) {
 			throw new IllegalStateException("Only the host can change Live room edit settings");
@@ -290,6 +314,23 @@ public final class LiveSessionManager implements Closeable {
 		editPolicy = policy;
 		broadcastTransient(LiveWireMessage.settings(invite.getSessionId(), policy.name()), null);
 		fireStateChanged("Hosting “" + roomName + "”");
+	}
+
+	public synchronized boolean transferHost(String newHostId) {
+		if (role != Role.HOST || newHostId == null || newHostId.equals(participantId)
+				|| pendingTransferParticipantId != null) {
+			return false;
+		}
+		for (Peer peer : peers) {
+			if (newHostId.equals(peer.participantId)) {
+				pendingTransferParticipantId = newHostId;
+				networkExecutor.execute(() -> send(peer,
+						LiveWireMessage.hostTransferRequest(invite.getSessionId())));
+				fireStateChanged("Waiting for “" + peer.participantName + "” to become host…");
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public List<Room> getAvailableRooms() throws IOException {
@@ -432,6 +473,8 @@ public final class LiveSessionManager implements Closeable {
 					handleProposal(peer, message);
 				} else if (message.getType() == LiveWireMessage.Type.PROPOSE_OFFLINE_BRANCH) {
 					handleOfflineProposal(peer, message);
+				} else if (message.getType() == LiveWireMessage.Type.HOST_TRANSFER_READY) {
+					completeHostTransfer(peer, message);
 				} else if (message.getType() == LiveWireMessage.Type.CHAT
 						|| message.getType() == LiveWireMessage.Type.PRESENCE
 						|| message.getType() == LiveWireMessage.Type.CURSOR) {
@@ -530,6 +573,136 @@ public final class LiveSessionManager implements Closeable {
 		});
 	}
 
+	private void prepareHostTransfer() {
+		if (role != Role.PARTICIPANT || pendingHostServer != null) {
+			return;
+		}
+		try {
+			ServerSocket preparedServer = bindServerSocket(0, false);
+			LiveInvite preparedInvite = new LiveInvite(findBestLocalAddress(), preparedServer.getLocalPort(),
+					invite.getSessionId(), invite.getSecret());
+			pendingHostServer = preparedServer;
+			pendingHostInvite = preparedInvite;
+			LiveSecureConnection connection = hostConnection;
+			if (connection == null) {
+				throw new IOException("The current host disconnected before the transfer was ready");
+			}
+			connection.send(LiveWireMessage.hostTransferReady(invite.getSessionId(), participantId,
+					participantName, preparedInvite.encode()));
+			fireStateChanged("Ready to become host…");
+		} catch (IOException e) {
+			closeQuietly(pendingHostServer);
+			pendingHostServer = null;
+			pendingHostInvite = null;
+			fireError("Could not prepare this computer to host the Live room", e);
+		}
+	}
+
+	private void completeHostTransfer(Peer peer, LiveWireMessage ready) {
+		if (role != Role.HOST || !peer.participantId.equals(pendingTransferParticipantId)) {
+			return;
+		}
+		LiveInvite newInvite;
+		try {
+			newInvite = LiveInvite.parse(ready.getText());
+			if (!invite.getSessionId().equals(newInvite.getSessionId())
+					|| !Arrays.equals(invite.getSecret(), newInvite.getSecret())) {
+				throw new IllegalArgumentException("The replacement host used a different room identity");
+			}
+		} catch (IllegalArgumentException e) {
+			pendingTransferParticipantId = null;
+			fireError("The replacement host sent an invalid Live invite", e);
+			return;
+		}
+
+		long transferRevision = nextRevision();
+		LiveSessionEvent event = LiveSessionEvent.create(invite.getSessionId(), transferRevision,
+				participantId, participantName, LiveSessionEvent.Type.HOST_TRANSFERRED,
+				"participant", peer.participantId,
+				participantName + " made " + peer.participantName + " the host", participantName,
+				peer.participantName);
+		recordEvent(event);
+		LiveWireMessage transfer = LiveWireMessage.hostTransfer(invite.getSessionId(), transferRevision,
+				peer.participantId, newInvite.encode(), event);
+		for (Peer connectedPeer : new ArrayList<>(peers)) {
+			try {
+				connectedPeer.connection.send(transfer);
+			} catch (IOException e) {
+				closeQuietly(connectedPeer.connection);
+			}
+		}
+		becomeParticipantAfterTransfer(newInvite);
+	}
+
+	private synchronized void becomeParticipantAfterTransfer(LiveInvite newInvite) {
+		role = Role.PARTICIPANT;
+		connected = false;
+		invite = newInvite;
+		pendingTransferParticipantId = null;
+		closeQuietly(serverSocket);
+		serverSocket = null;
+		for (Peer peer : peers) {
+			closeQuietly(peer.connection);
+		}
+		peers.clear();
+		bannedParticipantIds.clear();
+		retryInitialConnection = true;
+		everConnected = true;
+		fireStateChanged("Host transferred — reconnecting to the new host…");
+		scheduleReconnect();
+	}
+
+	private void handleHostTransfer(LiveWireMessage transfer) {
+		LiveInvite newInvite;
+		try {
+			newInvite = LiveInvite.parse(transfer.getText());
+		} catch (IllegalArgumentException e) {
+			fireError("The host sent an invalid replacement host invite", e);
+			return;
+		}
+		if (transfer.getEvent() != null) {
+			recordEvent(transfer.getEvent());
+		}
+		revision = Math.max(revision, transfer.getRevision());
+		if (participantId.equals(transfer.getParticipantId())) {
+			becomeHostAfterTransfer(newInvite);
+		} else {
+			invite = newInvite;
+			connected = false;
+			closeQuietly(hostConnection);
+			fireStateChanged("The host changed — reconnecting…");
+			scheduleReconnect();
+		}
+	}
+
+	private synchronized void becomeHostAfterTransfer(LiveInvite newInvite) {
+		if (pendingHostServer == null || pendingHostInvite == null) {
+			fireError("This computer was not ready to become the Live host", null);
+			return;
+		}
+		invite = newInvite;
+		serverSocket = pendingHostServer;
+		pendingHostServer = null;
+		pendingHostInvite = null;
+		role = Role.HOST;
+		connected = true;
+		closeQuietly(hostConnection);
+		hostConnection = null;
+		rebuildBannedParticipants();
+		networkExecutor.execute(this::acceptLoop);
+		fireStateChanged("Hosting “" + roomName + "”");
+	}
+
+	private void rebuildBannedParticipants() {
+		bannedParticipantIds.clear();
+		for (LiveSessionEvent event : getHistory()) {
+			if (event.getType() == LiveSessionEvent.Type.PARTICIPANT_BANNED
+					&& event.getTargetId() != null) {
+				bannedParticipantIds.add(event.getTargetId());
+			}
+		}
+	}
+
 	private void connectToHost() {
 		reconnectScheduled = false;
 		Socket socket = null;
@@ -553,7 +726,7 @@ public final class LiveSessionManager implements Closeable {
 			everConnected = true;
 			socket.setSoTimeout(0);
 			handleHostMessage(message);
-			while ((message = hostConnection.receive()) != null && role == Role.PARTICIPANT) {
+			while (role == Role.PARTICIPANT && (message = hostConnection.receive()) != null) {
 				handleHostMessage(message);
 			}
 			if (role == Role.PARTICIPANT) {
@@ -644,6 +817,14 @@ public final class LiveSessionManager implements Closeable {
 				|| message.getType() == LiveWireMessage.Type.PRESENCE
 				|| message.getType() == LiveWireMessage.Type.CURSOR) {
 			notifyTransient(message);
+			return;
+		}
+		if (message.getType() == LiveWireMessage.Type.HOST_TRANSFER_REQUEST) {
+			prepareHostTransfer();
+			return;
+		}
+		if (message.getType() == LiveWireMessage.Type.HOST_TRANSFER) {
+			handleHostTransfer(message);
 			return;
 		}
 		if (message.getType() == LiveWireMessage.Type.EVENT) {
@@ -833,6 +1014,10 @@ public final class LiveSessionManager implements Closeable {
 	private void participantDisconnected(Peer peer) {
 		if (!peers.remove(peer)) {
 			return;
+		}
+		if (peer.participantId.equals(pendingTransferParticipantId)) {
+			pendingTransferParticipantId = null;
+			fireStateChanged("Host transfer canceled because the participant disconnected");
 		}
 		if (role != Role.HOST || invite == null) {
 			return;
@@ -1062,7 +1247,7 @@ public final class LiveSessionManager implements Closeable {
 		try {
 			sessionLog.append(event);
 		} catch (IOException e) {
-			fireError("Could not append to the local OpenRocket Live changelog", e);
+			fireError("Could not append to the local OpenRocket Live activity log", e);
 		}
 		fireEventReceived(event);
 	}
@@ -1193,9 +1378,13 @@ public final class LiveSessionManager implements Closeable {
 		}
 		peers.clear();
 		closeQuietly(serverSocket);
+		closeQuietly(pendingHostServer);
 		closeQuietly(sessionLog);
 		hostConnection = null;
 		serverSocket = null;
+		pendingHostServer = null;
+		pendingHostInvite = null;
+		pendingTransferParticipantId = null;
 		sessionLog = null;
 		invite = null;
 		history.clear();

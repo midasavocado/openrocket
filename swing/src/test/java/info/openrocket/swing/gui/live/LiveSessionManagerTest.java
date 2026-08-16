@@ -192,6 +192,36 @@ class LiveSessionManagerTest extends BaseTestCase {
 		}
 	}
 
+	@Test
+	void hostCanTransferTheRoomAndBecomeAParticipant() throws Exception {
+		OpenRocketDocument firstHostDocument = OpenRocketDocumentFactory.createNewRocket();
+		File firstHostFile = temporaryDirectory.resolve("first-host.ork").toFile();
+		firstHostDocument.setFile(firstHostFile);
+		new GeneralRocketSaver().save(firstHostFile, firstHostDocument);
+		OpenRocketDocument nextHostDocument = OpenRocketDocumentFactory.createNewRocket();
+		RecordingListener nextHostListener = new RecordingListener();
+		LiveSessionManager firstHost = new LiveSessionManager(firstHostDocument, new RecordingListener());
+		LiveSessionManager nextHost = new LiveSessionManager(nextHostDocument, nextHostListener);
+		try {
+			LiveInvite originalInvite = firstHost.host("First Host", "Handoff Room", null);
+			nextHost.join(originalInvite, "Next Host", temporaryDirectory.resolve("next-host.ork").toFile());
+			assertTrue(nextHostListener.live.await(8, TimeUnit.SECONDS));
+
+			assertTrue(firstHost.transferHost(nextHost.getParticipantId()));
+			await(() -> nextHost.getRole() == LiveSessionManager.Role.HOST
+					&& firstHost.getRole() == LiveSessionManager.Role.PARTICIPANT
+					&& firstHost.isConnected(), 12);
+			assertEquals("Handoff Room", nextHost.getRoomName());
+			assertEquals(originalInvite.getSessionId(), nextHost.getInvite().getSessionId());
+
+			SwingUtilities.invokeAndWait(() -> firstHostDocument.getRocket().setName("Edited After Handoff"));
+			await(() -> "Edited After Handoff".equals(nextHostDocument.getRocket().getName()), 8);
+		} finally {
+			nextHost.close();
+			firstHost.close();
+		}
+	}
+
 	private static void await(BooleanSupplier condition, int seconds) throws Exception {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
 		while (!condition.getAsBoolean() && System.nanoTime() < deadline) {

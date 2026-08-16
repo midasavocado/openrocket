@@ -14,6 +14,9 @@ public final class LiveWireMessage {
 		DOCUMENT_UPDATE,
 		EVENT,
 		SETTINGS,
+		HOST_TRANSFER_REQUEST,
+		HOST_TRANSFER_READY,
+		HOST_TRANSFER,
 		CHAT,
 		PRESENCE,
 		CURSOR,
@@ -104,6 +107,28 @@ public final class LiveWireMessage {
 		return message;
 	}
 
+	public static LiveWireMessage hostTransferRequest(String sessionId) {
+		return newSessionMessage(Type.HOST_TRANSFER_REQUEST, sessionId);
+	}
+
+	public static LiveWireMessage hostTransferReady(String sessionId, String participantId,
+			String participantName, String invite) {
+		LiveWireMessage message = participantMessage(Type.HOST_TRANSFER_READY, sessionId,
+				participantId, participantName);
+		message.text = invite;
+		return message;
+	}
+
+	public static LiveWireMessage hostTransfer(String sessionId, long revision, String newHostId,
+			String invite, LiveSessionEvent event) {
+		LiveWireMessage message = newSessionMessage(Type.HOST_TRANSFER, sessionId);
+		message.revision = revision;
+		message.participantId = newHostId;
+		message.text = invite;
+		message.event = event;
+		return message;
+	}
+
 	public static LiveWireMessage error(String text) {
 		LiveWireMessage message = new LiveWireMessage(Type.ERROR);
 		message.text = text;
@@ -147,6 +172,12 @@ public final class LiveWireMessage {
 		message.sessionId = sessionId;
 		message.participantId = participantId;
 		message.participantName = participantName;
+		return message;
+	}
+
+	private static LiveWireMessage newSessionMessage(Type type, String sessionId) {
+		LiveWireMessage message = new LiveWireMessage(type);
+		message.sessionId = sessionId;
 		return message;
 	}
 
