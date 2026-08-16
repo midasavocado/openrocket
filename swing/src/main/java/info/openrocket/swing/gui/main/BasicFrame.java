@@ -1,6 +1,7 @@
 package info.openrocket.swing.gui.main;
 
 import java.awt.AWTEvent;
+import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.EventQueue;
 import java.awt.GraphicsConfiguration;
@@ -22,6 +23,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.awt.datatransfer.StringSelection;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -125,6 +127,10 @@ import info.openrocket.swing.gui.dialogs.optimization.GeneralOptimizationDialog;
 import info.openrocket.swing.gui.dialogs.preferences.PreferencesDialog;
 import info.openrocket.swing.gui.figure3d.photo.PhotoFrame;
 import info.openrocket.swing.gui.help.tours.GuidedTourSelectionDialog;
+import info.openrocket.swing.gui.live.LiveSessionManager;
+import info.openrocket.swing.gui.live.LiveSidebar;
+import info.openrocket.swing.gui.live.LiveCursorController;
+import info.openrocket.core.live.LiveInvite;
 import info.openrocket.swing.gui.main.componenttree.ComponentTree;
 import info.openrocket.swing.gui.scalefigure.RocketPanel;
 import info.openrocket.swing.gui.util.DummyFrameMenuOSX;
@@ -194,6 +200,9 @@ private static final Translator trans = Application.getTranslator();
 	private final DesignPanel designPanel;
 	private final FlightConfigurationPanel flightConfigurationPanel;
 	private final SimulationPanel simulationPanel;
+	private final LiveSessionManager liveSessionManager;
+	private final LiveSidebar liveSidebar;
+	private final LiveCursorController liveCursorController;
 
 	private boolean showBananaForScaleInToolsMenu = false;
 	private JCheckBoxMenuItem bananaForScaleMenuItem = null;
@@ -218,6 +227,9 @@ private static final Translator trans = Application.getTranslator();
 
 		this.document = document;
 		this.rocket = document.getRocket();
+		this.liveSidebar = new LiveSidebar(this);
+		this.liveSessionManager = new LiveSessionManager(document, liveSidebar);
+		this.liveSidebar.setSessionManager(liveSessionManager);
 		BasicFrame.lastFrameInstance = this;
 
 		//	Create the component tree selection model that will be used
@@ -253,6 +265,7 @@ private static final Translator trans = Application.getTranslator();
 		tabbedPane.addTab(trans.get("BasicFrame.tab.Rocketdesign"), null, designPanel);
 		tabbedPane.addTab(trans.get("BasicFrame.tab.Flightconfig"), null, flightConfigurationPanel);
 		tabbedPane.addTab(trans.get("BasicFrame.tab.Flightsim"), null, simulationPanel);
+		liveCursorController = new LiveCursorController(this, tabbedPane, liveSessionManager);
 
 		//	Add change listener to catch when the tabs are changed.  This is to run simulations
 		//	automatically when the simulation tab is selected.
@@ -267,7 +280,8 @@ private static final Translator trans = Application.getTranslator();
 		vertical.setResizeWeight(0.5);
 		vertical.setTopComponent(tabbedPane);
 		vertical.setBottomComponent(rocketpanel);
-		this.add(vertical);
+		this.add(vertical, BorderLayout.CENTER);
+		this.add(liveSidebar, BorderLayout.EAST);
 
 		// Populate the popup menu
 		{
@@ -379,6 +393,8 @@ private static final Translator trans = Application.getTranslator();
 
 	@Override
 	public void dispose() {
+		liveCursorController.close();
+		liveSessionManager.close();
 		uninstallBananaAltKeyTracker();
 		super.dispose();
 	}
@@ -808,6 +824,8 @@ private static final Translator trans = Application.getTranslator();
 			editMenu.add(item);
 		}
 
+		menubar.add(createLiveMenu());
+
 
 		//	Tools
 		JMenu toolsMenu = new JMenu(trans.get("main.menu.tools"));
@@ -931,6 +949,123 @@ private static final Translator trans = Application.getTranslator();
 		generateHelpMenu(menubar, this);
 
 		this.setJMenuBar(menubar);
+	}
+
+	private JMenu createLiveMenu() {
+		JMenu menu = new JMenu("Live");
+		menu.setMnemonic(KeyEvent.VK_L);
+
+		JMenuItem host = new JMenuItem("Host Live Session...");
+		host.addActionListener(event -> hostLiveSession());
+		menu.add(host);
+
+		JMenuItem join = new JMenuItem("Join Live Session...");
+		join.addActionListener(event -> joinLiveSession());
+		menu.add(join);
+
+		JMenuItem copyInvite = new JMenuItem("Copy Invite");
+		copyInvite.addActionListener(event -> copyLiveInvite());
+		menu.add(copyInvite);
+
+		menu.addSeparator();
+		JCheckBoxMenuItem showSidebar = new JCheckBoxMenuItem("Show Live Sidebar");
+		showSidebar.addActionListener(event -> {
+			liveSidebar.setVisible(showSidebar.isSelected());
+			revalidate();
+		});
+		menu.add(showSidebar);
+		JCheckBoxMenuItem showCursors = new JCheckBoxMenuItem("Show Friends' Cursors", true);
+		showCursors.addActionListener(event -> liveCursorController.setCursorsVisible(showCursors.isSelected()));
+		menu.add(showCursors);
+
+		JMenuItem leave = new JMenuItem("Leave or End Session");
+		leave.addActionListener(event -> liveSessionManager.leaveSession());
+		menu.add(leave);
+		return menu;
+	}
+
+	private void hostLiveSession() {
+		if (liveSessionManager.getRole() != LiveSessionManager.Role.IDLE) {
+			JOptionPane.showMessageDialog(this, "This design is already in a Live session.",
+					"OpenRocket Live", JOptionPane.INFORMATION_MESSAGE);
+			return;
+		}
+		if (document.getFile() == null && !saveAsAction()) {
+			return;
+		}
+		String name = JOptionPane.showInputDialog(this, "Your display name:",
+				System.getProperty("user.name", "Host"));
+		if (name == null || name.isBlank()) {
+			return;
+		}
+		try {
+			LiveInvite newInvite = liveSessionManager.host(name.trim());
+			copyToClipboard(newInvite.encode());
+			liveSidebar.setVisible(true);
+			revalidate();
+			JTextField inviteField = new JTextField(newInvite.encode(), 42);
+			inviteField.setEditable(false);
+			inviteField.selectAll();
+			JOptionPane.showMessageDialog(this,
+					new Object[] { "The direct Live invite was copied to your clipboard.", inviteField },
+					"OpenRocket Live", JOptionPane.INFORMATION_MESSAGE);
+		} catch (IOException | IllegalStateException e) {
+			JOptionPane.showMessageDialog(this, e.getMessage(), "OpenRocket Live", JOptionPane.ERROR_MESSAGE);
+		}
+	}
+
+	private void joinLiveSession() {
+		if (liveSessionManager.getRole() != LiveSessionManager.Role.IDLE) {
+			JOptionPane.showMessageDialog(this, "This design is already in a Live session.",
+					"OpenRocket Live", JOptionPane.INFORMATION_MESSAGE);
+			return;
+		}
+		String inviteText = JOptionPane.showInputDialog(this, "Paste the OpenRocket Live invite:");
+		if (inviteText == null || inviteText.isBlank()) {
+			return;
+		}
+		LiveInvite parsedInvite;
+		try {
+			parsedInvite = LiveInvite.parse(inviteText);
+		} catch (IllegalArgumentException e) {
+			JOptionPane.showMessageDialog(this, e.getMessage(), "OpenRocket Live", JOptionPane.ERROR_MESSAGE);
+			return;
+		}
+
+		String name = JOptionPane.showInputDialog(this, "Your display name:",
+				System.getProperty("user.name", "Friend"));
+		if (name == null || name.isBlank()) {
+			return;
+		}
+		File file = openFileSaveAsDialog(FileType.OPENROCKET);
+		if (file == null) {
+			return;
+		}
+		file = FileHelper.forceExtension(file, "ork");
+		if (!FileHelper.confirmWrite(file, this)) {
+			return;
+		}
+		try {
+			liveSessionManager.join(parsedInvite, name.trim(), file);
+			liveSidebar.setVisible(true);
+			revalidate();
+		} catch (IOException | IllegalStateException e) {
+			JOptionPane.showMessageDialog(this, e.getMessage(), "OpenRocket Live", JOptionPane.ERROR_MESSAGE);
+		}
+	}
+
+	private void copyLiveInvite() {
+		LiveInvite currentInvite = liveSessionManager.getInvite();
+		if (currentInvite == null || liveSessionManager.getRole() != LiveSessionManager.Role.HOST) {
+			JOptionPane.showMessageDialog(this, "Host a Live session before copying an invite.",
+					"OpenRocket Live", JOptionPane.INFORMATION_MESSAGE);
+			return;
+		}
+		copyToClipboard(currentInvite.encode());
+	}
+
+	private static void copyToClipboard(String text) {
+		Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
 	}
 
 	private static boolean isAltDownInCurrentAwtEvent() {

@@ -981,6 +981,51 @@ public class OpenRocketDocument implements ComponentChangeListener, StateChangeL
 		}
 		return documentCopy;
 	}
+
+	/**
+	 * Replace the editable contents of this document with a Live session snapshot while
+	 * preserving this document's local file association and listeners.
+	 *
+	 * @param source decoded Live session snapshot
+	 */
+	public void applyLiveSnapshot(OpenRocketDocument source) {
+		inUndoRedo = true;
+		try {
+			rocket.loadFrom(source.getRocket().copyWithOriginalID());
+
+			simulations.clear();
+			for (Simulation sourceSimulation : source.getSimulations()) {
+				Simulation simulation = new Simulation(this, rocket, sourceSimulation.getStatus(),
+						sourceSimulation.getName(), sourceSimulation.getOptions().clone(),
+						sourceSimulation.getSimulationExtensions(), sourceSimulation.getSimulatedData(),
+						sourceSimulation.getPlotAppearances());
+				simulation.setFlightConfigurationId(sourceSimulation.getId());
+				simulations.add(simulation);
+			}
+
+			customExpressions.clear();
+			for (CustomExpression expression : source.getCustomExpressions()) {
+				customExpressions.add(new CustomExpression(this, expression.getName(), expression.getSymbol(),
+						expression.getUnit(), expression.getExpressionString()));
+			}
+
+			photoSettings = new HashMap<>(source.getPhotoSettings());
+			docPrefs.getPreferencesMap().clear();
+			docPrefs.getPreferencesMap().putAll(source.getDocumentPreferences().getPreferencesMap());
+			for (Material.Type type : new Material.Type[] {
+					Material.Type.BULK, Material.Type.SURFACE, Material.Type.LINE }) {
+				docPrefs.getDatabase(type).clear();
+				docPrefs.getDatabase(type).addAll(source.getDocumentPreferences().getDatabase(type));
+			}
+
+			modID = new ModID();
+			clearUndo();
+			setSaved(false);
+		} finally {
+			inUndoRedo = false;
+		}
+		fireDocumentChangeEvent(new DocumentChangeEvent(this));
+	}
 	
 	
 	

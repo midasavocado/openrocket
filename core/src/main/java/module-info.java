@@ -63,6 +63,7 @@ open module info.openrocket.core {
 	exports info.openrocket.core.gui.util;
 	exports info.openrocket.core.l10n;
 	exports info.openrocket.core.logging;
+	exports info.openrocket.core.live;
 	exports info.openrocket.core.masscalc;
 	exports info.openrocket.core.material;
 	exports info.openrocket.core.models.atmosphere;

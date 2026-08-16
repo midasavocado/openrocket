@@ -89,6 +89,21 @@ public class GeneralRocketSaver {
 	}
 
 	/**
+	 * Save an OpenRocket document to an output stream using its default storage options.
+	 * The stream contains the same zip container that would be written to an .ork file.
+	 *
+	 * @param output destination stream
+	 * @param document document to save
+	 * @throws IOException in case of an I/O error
+	 * @throws DecalNotFoundException if a referenced decal cannot be read
+	 */
+	public final void save(OutputStream output, OpenRocketDocument document)
+			throws IOException, DecalNotFoundException {
+		Set<DecalImage> usedDecals = collectUsedDecals(document);
+		saveAllPartsZipFile(output, document, document.getDefaultStorageOptions().clone(), usedDecals);
+	}
+
+	/**
 	 * Save the document to a file with default StorageOptions and a SavingProgress
 	 * callback object.
 	 * 
@@ -197,9 +212,12 @@ public class GeneralRocketSaver {
 			return;
 		}
 
-		Set<DecalImage> usedDecals = new TreeSet<>();
+		Set<DecalImage> usedDecals = collectUsedDecals(document);
+		saveAllPartsZipFile(output, document, options, usedDecals);
+	}
 
-		// Look for all decals used in the rocket.
+	private Set<DecalImage> collectUsedDecals(OpenRocketDocument document) {
+		Set<DecalImage> usedDecals = new TreeSet<>();
 		for (RocketComponent c : document.getRocket()) {
 			Appearance ap = c.getAppearance();
 			Appearance ap_in = null;
@@ -219,8 +237,7 @@ public class GeneralRocketSaver {
 					usedDecals.add(decal.getImage());
 			}
 		}
-
-		saveAllPartsZipFile(output, document, options, usedDecals);
+		return usedDecals;
 	}
 
 	public void saveAllPartsZipFile(OutputStream output, OpenRocketDocument document, StorageOptions options,
