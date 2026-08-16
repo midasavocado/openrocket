@@ -1,9 +1,11 @@
 package info.openrocket.swing.gui.live;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
@@ -46,6 +48,8 @@ class LiveSessionManagerTest extends BaseTestCase {
 			LiveInvite invite = host.host("Host");
 			participant.join(invite, "Friend", participantFile);
 			assertTrue(participantListener.live.await(8, TimeUnit.SECONDS));
+			assertTrue(host.isConnected());
+			assertTrue(participant.isConnected());
 
 			SwingUtilities.invokeAndWait(() -> hostDocument.getRocket().setName("Live Rocket"));
 			await(() -> "Live Rocket".equals(participantDocument.getRocket().getName()), 8);
@@ -87,6 +91,26 @@ class LiveSessionManagerTest extends BaseTestCase {
 		}
 	}
 
+	@Test
+	void failedJoinReturnsToIdleInsteadOfTrappingTheDocument() throws Exception {
+		int unusedPort;
+		try (ServerSocket socket = new ServerSocket(0)) {
+			unusedPort = socket.getLocalPort();
+		}
+		LiveInvite unreachable = LiveInvite.create("127.0.0.1", unusedPort);
+		OpenRocketDocument document = OpenRocketDocumentFactory.createNewRocket();
+		RecordingListener listener = new RecordingListener();
+		LiveSessionManager participant = new LiveSessionManager(document, listener);
+		try {
+			participant.join(unreachable, "Friend", temporaryDirectory.resolve("failed.ork").toFile());
+			await(() -> participant.getRole() == LiveSessionManager.Role.IDLE, 8);
+			assertFalse(participant.isConnected());
+			assertTrue(listener.error.await(8, TimeUnit.SECONDS));
+		} finally {
+			participant.close();
+		}
+	}
+
 	private static void await(BooleanSupplier condition, int seconds) throws Exception {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
 		while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
@@ -97,6 +121,7 @@ class LiveSessionManagerTest extends BaseTestCase {
 
 	private static final class RecordingListener implements LiveSessionManager.Listener {
 		private final CountDownLatch live = new CountDownLatch(1);
+		private final CountDownLatch error = new CountDownLatch(1);
 		private final CopyOnWriteArrayList<String> chatMessages = new CopyOnWriteArrayList<>();
 		private final CopyOnWriteArrayList<String> presenceMessages = new CopyOnWriteArrayList<>();
 		private final CopyOnWriteArrayList<String> cursorMessages = new CopyOnWriteArrayList<>();
@@ -114,6 +139,7 @@ class LiveSessionManagerTest extends BaseTestCase {
 
 		@Override
 		public void error(String message, Throwable cause) {
+			error.countDown();
 		}
 
 		@Override

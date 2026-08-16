@@ -64,6 +64,7 @@ public final class LiveSidebar extends JPanel implements LiveSessionManager.List
 		chatArea.setWrapStyleWord(true);
 		chatPanel.add(new JScrollPane(chatArea), BorderLayout.CENTER);
 		chatInput.setToolTipText("Message everyone in this Live session");
+		chatInput.setEnabled(false);
 		chatInput.addActionListener(event -> sendChat());
 		chatPanel.add(chatInput, BorderLayout.SOUTH);
 		tabs.addTab("Chat", chatPanel);
@@ -80,7 +81,7 @@ public final class LiveSidebar extends JPanel implements LiveSessionManager.List
 
 	private void sendChat() {
 		String text = chatInput.getText();
-		if (sessionManager != null && !text.isBlank()) {
+		if (sessionManager != null && sessionManager.isConnected() && !text.isBlank()) {
 			sessionManager.sendChat(text);
 			chatInput.setText("");
 		}
@@ -89,6 +90,14 @@ public final class LiveSidebar extends JPanel implements LiveSessionManager.List
 	@Override
 	public void stateChanged(LiveSessionManager.Role role, String status) {
 		statusLabel.setText(status);
+		chatInput.setEnabled(sessionManager != null && sessionManager.isConnected());
+		if (role == LiveSessionManager.Role.IDLE) {
+			activityModel.clear();
+			people.clear();
+			peopleModel.clear();
+			chatArea.setText("");
+			chatInput.setText("");
+		}
 	}
 
 	@Override

@@ -54,11 +54,14 @@ public final class LiveSessionManager implements Closeable {
 	}
 
 	public interface Listener {
-		void stateChanged(Role role, String status);
+		default void stateChanged(Role role, String status) {
+		}
 
-		void eventReceived(LiveSessionEvent event);
+		default void eventReceived(LiveSessionEvent event) {
+		}
 
-		void error(String message, Throwable cause);
+		default void error(String message, Throwable cause) {
+		}
 
 		default void chatReceived(String participantId, String participantName, String timestamp, String text) {
 		}
@@ -102,6 +105,7 @@ public final class LiveSessionManager implements Closeable {
 	private volatile Role role = Role.IDLE;
 	private volatile long revision;
 	private volatile boolean applyingRemote;
+	private volatile boolean connected;
 	private volatile boolean closed;
 	private String participantId;
 	private String participantName;
@@ -139,6 +143,7 @@ public final class LiveSessionManager implements Closeable {
 		invite = LiveInvite.create(findBestLocalAddress(), serverSocket.getLocalPort());
 		sessionLog = new LiveSessionLog(LiveSessionLog.pathForDesign(document.getFile()));
 		role = Role.HOST;
+		connected = true;
 		document.addDocumentChangeListener(documentListener);
 
 		LiveSessionEvent event = LiveSessionEvent.create(invite.getSessionId(), revision, participantId,
@@ -175,6 +180,10 @@ public final class LiveSessionManager implements Closeable {
 
 	public long getRevision() {
 		return revision;
+	}
+
+	public boolean isConnected() {
+		return connected;
 	}
 
 	public synchronized List<LiveSessionEvent> getHistory() {
@@ -295,17 +304,28 @@ public final class LiveSessionManager implements Closeable {
 
 			LiveWireMessage message;
 			message = hostConnection.receive();
-			socket.setSoTimeout(0);
-			if (message != null) {
-				handleHostMessage(message);
+			if (message == null || message.getType() != LiveWireMessage.Type.WELCOME) {
+				throw new IOException("The host did not accept the OpenRocket Live session");
 			}
+			socket.setSoTimeout(0);
+			handleHostMessage(message);
 			while ((message = hostConnection.receive()) != null && role == Role.PARTICIPANT) {
 				handleHostMessage(message);
 			}
 		} catch (IOException e) {
 			if (!closed && role == Role.PARTICIPANT) {
-				fireError("OpenRocket Live connection ended", e);
-				fireStateChanged("Disconnected; your local files are still available");
+				boolean wasConnected = connected;
+				SwingUtilities.invokeLater(() -> {
+					if (role != Role.PARTICIPANT) {
+						return;
+					}
+					leaveSession();
+					String message = wasConnected
+							? "The Live connection ended. Your local files are still available."
+							: "Could not join the Live session. Check that the host is reachable and on your network.";
+					fireStateChanged(message);
+					fireError(message, e);
+				});
 			}
 		}
 	}
@@ -359,6 +379,7 @@ public final class LiveSessionManager implements Closeable {
 				applyingRemote = false;
 			}
 			revision = message.getRevision();
+			connected = true;
 			for (LiveSessionEvent event : message.getHistory()) {
 				recordEvent(event);
 			}
@@ -371,7 +392,7 @@ public final class LiveSessionManager implements Closeable {
 	}
 
 	public void sendChat(String text) {
-		if (text == null || text.isBlank() || role == Role.IDLE) {
+		if (text == null || text.isBlank() || !connected) {
 			return;
 		}
 		String normalized = text.trim();
@@ -389,7 +410,7 @@ public final class LiveSessionManager implements Closeable {
 	}
 
 	public void sendPresence(String surfaceId) {
-		if (surfaceId == null || role == Role.IDLE) {
+		if (surfaceId == null || !connected) {
 			return;
 		}
 		LiveWireMessage message = LiveWireMessage.presence(invite.getSessionId(), participantId,
@@ -402,7 +423,7 @@ public final class LiveSessionManager implements Closeable {
 	}
 
 	public void sendCursor(String surfaceId, double x, double y) {
-		if (surfaceId == null || role == Role.IDLE) {
+		if (surfaceId == null || !connected) {
 			return;
 		}
 		LiveWireMessage message = LiveWireMessage.cursor(invite.getSessionId(), participantId,
@@ -700,6 +721,7 @@ public final class LiveSessionManager implements Closeable {
 		loggedEventIds.clear();
 		revision = 0;
 		role = Role.IDLE;
+		connected = false;
 		fireStateChanged("Not in a Live session");
 	}
 

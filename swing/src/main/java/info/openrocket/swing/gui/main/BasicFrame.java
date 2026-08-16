@@ -203,6 +203,12 @@ private static final Translator trans = Application.getTranslator();
 	private final LiveSessionManager liveSessionManager;
 	private final LiveSidebar liveSidebar;
 	private final LiveCursorController liveCursorController;
+	private JMenuItem startLiveSessionMenuItem;
+	private JMenuItem joinLiveSessionMenuItem;
+	private JMenuItem copyLiveInviteMenuItem;
+	private JCheckBoxMenuItem showLiveSidebarMenuItem;
+	private JCheckBoxMenuItem showLiveCursorsMenuItem;
+	private JMenuItem leaveLiveSessionMenuItem;
 
 	private boolean showBananaForScaleInToolsMenu = false;
 	private JCheckBoxMenuItem bananaForScaleMenuItem = null;
@@ -952,36 +958,105 @@ private static final Translator trans = Application.getTranslator();
 	}
 
 	private JMenu createLiveMenu() {
-		JMenu menu = new JMenu("Live");
-		menu.setMnemonic(KeyEvent.VK_L);
+		JMenu menu = new JMenu("Collaborate");
+		menu.setMnemonic(KeyEvent.VK_C);
 
-		JMenuItem host = new JMenuItem("Host Live Session...");
-		host.addActionListener(event -> hostLiveSession());
-		menu.add(host);
+		startLiveSessionMenuItem = new JMenuItem("Start Live Session...");
+		startLiveSessionMenuItem.addActionListener(event -> hostLiveSession());
+		menu.add(startLiveSessionMenuItem);
 
-		JMenuItem join = new JMenuItem("Join Live Session...");
-		join.addActionListener(event -> joinLiveSession());
-		menu.add(join);
+		joinLiveSessionMenuItem = new JMenuItem("Join Live Session...");
+		joinLiveSessionMenuItem.addActionListener(event -> joinLiveSession());
+		menu.add(joinLiveSessionMenuItem);
 
-		JMenuItem copyInvite = new JMenuItem("Copy Invite");
-		copyInvite.addActionListener(event -> copyLiveInvite());
-		menu.add(copyInvite);
+		copyLiveInviteMenuItem = new JMenuItem("Copy Invite Link");
+		copyLiveInviteMenuItem.addActionListener(event -> copyLiveInvite());
+		menu.add(copyLiveInviteMenuItem);
 
 		menu.addSeparator();
-		JCheckBoxMenuItem showSidebar = new JCheckBoxMenuItem("Show Live Sidebar");
-		showSidebar.addActionListener(event -> {
-			liveSidebar.setVisible(showSidebar.isSelected());
+		showLiveSidebarMenuItem = new JCheckBoxMenuItem("Show Collaboration Sidebar");
+		showLiveSidebarMenuItem.addActionListener(event -> {
+			liveSidebar.setVisible(showLiveSidebarMenuItem.isSelected());
 			revalidate();
 		});
-		menu.add(showSidebar);
-		JCheckBoxMenuItem showCursors = new JCheckBoxMenuItem("Show Friends' Cursors", true);
-		showCursors.addActionListener(event -> liveCursorController.setCursorsVisible(showCursors.isSelected()));
-		menu.add(showCursors);
+		menu.add(showLiveSidebarMenuItem);
+		showLiveCursorsMenuItem = new JCheckBoxMenuItem("Show Collaborators' Cursors", true);
+		showLiveCursorsMenuItem.addActionListener(event ->
+				liveCursorController.setCursorsVisible(showLiveCursorsMenuItem.isSelected()));
+		menu.add(showLiveCursorsMenuItem);
 
-		JMenuItem leave = new JMenuItem("Leave or End Session");
-		leave.addActionListener(event -> liveSessionManager.leaveSession());
-		menu.add(leave);
+		menu.addSeparator();
+		leaveLiveSessionMenuItem = new JMenuItem("Leave Live Session");
+		leaveLiveSessionMenuItem.addActionListener(event -> leaveLiveSession());
+		menu.add(leaveLiveSessionMenuItem);
+		liveSessionManager.addListener(new LiveSessionManager.Listener() {
+			@Override
+			public void stateChanged(LiveSessionManager.Role role, String status) {
+				if (role == LiveSessionManager.Role.IDLE) {
+					showLiveSidebarMenuItem.setSelected(false);
+					liveSidebar.setVisible(false);
+					revalidate();
+				}
+				updateLiveMenuState();
+			}
+		});
+		updateLiveMenuState();
 		return menu;
+	}
+
+	private void updateLiveMenuState() {
+		LiveSessionManager.Role role = liveSessionManager.getRole();
+		boolean idle = role == LiveSessionManager.Role.IDLE;
+		boolean connected = liveSessionManager.isConnected();
+		startLiveSessionMenuItem.setEnabled(idle);
+		joinLiveSessionMenuItem.setEnabled(idle);
+		copyLiveInviteMenuItem.setEnabled(connected);
+		showLiveSidebarMenuItem.setEnabled(!idle);
+		showLiveCursorsMenuItem.setEnabled(connected);
+		leaveLiveSessionMenuItem.setEnabled(!idle);
+		if (role == LiveSessionManager.Role.HOST) {
+			leaveLiveSessionMenuItem.setText("End Live Session...");
+		} else if (role == LiveSessionManager.Role.PARTICIPANT && !connected) {
+			leaveLiveSessionMenuItem.setText("Cancel Joining...");
+		} else {
+			leaveLiveSessionMenuItem.setText("Leave Live Session...");
+		}
+	}
+
+	private void showLiveSidebar() {
+		showLiveSidebarMenuItem.setSelected(true);
+		liveSidebar.setVisible(true);
+		revalidate();
+	}
+
+	private void leaveLiveSession() {
+		LiveSessionManager.Role role = liveSessionManager.getRole();
+		if (role == LiveSessionManager.Role.IDLE) {
+			return;
+		}
+		String title;
+		String message;
+		if (role == LiveSessionManager.Role.HOST) {
+			title = "End Live Session?";
+			message = "End this Live session and disconnect everyone?\n\n"
+					+ "Everyone's local .ork and .orklog files will remain saved.";
+		} else if (!liveSessionManager.isConnected()) {
+			title = "Cancel Joining?";
+			message = "Stop trying to join this Live session?";
+		} else {
+			title = "Leave Live Session?";
+			message = "Leave this Live session?\n\nYour local .ork and .orklog files will remain saved.";
+		}
+		int result = JOptionPane.showConfirmDialog(this, message, title,
+				JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+		if (result != JOptionPane.YES_OPTION) {
+			return;
+		}
+		liveSessionManager.leaveSession();
+		showLiveSidebarMenuItem.setSelected(false);
+		liveSidebar.setVisible(false);
+		updateLiveMenuState();
+		revalidate();
 	}
 
 	private void hostLiveSession() {
@@ -1001,13 +1076,15 @@ private static final Translator trans = Application.getTranslator();
 		try {
 			LiveInvite newInvite = liveSessionManager.host(name.trim());
 			copyToClipboard(newInvite.encode());
-			liveSidebar.setVisible(true);
-			revalidate();
+			showLiveSidebar();
+			updateLiveMenuState();
 			JTextField inviteField = new JTextField(newInvite.encode(), 42);
 			inviteField.setEditable(false);
 			inviteField.selectAll();
 			JOptionPane.showMessageDialog(this,
-					new Object[] { "The direct Live invite was copied to your clipboard.", inviteField },
+					new Object[] {
+							"Invite copied. This version currently works with people on the same local network,",
+							"or when this computer is directly reachable from the Internet.", inviteField },
 					"OpenRocket Live", JOptionPane.INFORMATION_MESSAGE);
 		} catch (IOException | IllegalStateException e) {
 			JOptionPane.showMessageDialog(this, e.getMessage(), "OpenRocket Live", JOptionPane.ERROR_MESSAGE);
@@ -1047,8 +1124,8 @@ private static final Translator trans = Application.getTranslator();
 		}
 		try {
 			liveSessionManager.join(parsedInvite, name.trim(), file);
-			liveSidebar.setVisible(true);
-			revalidate();
+			showLiveSidebar();
+			updateLiveMenuState();
 		} catch (IOException | IllegalStateException e) {
 			JOptionPane.showMessageDialog(this, e.getMessage(), "OpenRocket Live", JOptionPane.ERROR_MESSAGE);
 		}
@@ -1056,8 +1133,8 @@ private static final Translator trans = Application.getTranslator();
 
 	private void copyLiveInvite() {
 		LiveInvite currentInvite = liveSessionManager.getInvite();
-		if (currentInvite == null || liveSessionManager.getRole() != LiveSessionManager.Role.HOST) {
-			JOptionPane.showMessageDialog(this, "Host a Live session before copying an invite.",
+		if (currentInvite == null || liveSessionManager.getRole() == LiveSessionManager.Role.IDLE) {
+			JOptionPane.showMessageDialog(this, "Start or join a Live session before copying its invite.",
 					"OpenRocket Live", JOptionPane.INFORMATION_MESSAGE);
 			return;
 		}
